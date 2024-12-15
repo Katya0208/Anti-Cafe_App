@@ -12,7 +12,7 @@ import os
 load_dotenv()
 
 # Настройки для JWT
-SECRET_KEY = os.getenv("SECRET_KEY", "your_default_secret_key")  # Важно: Используйте надежный секретный ключ и храните его в переменных окружения
+SECRET_KEY = os.getenv("SECRET_KEY", "your_default_secret_key") 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 

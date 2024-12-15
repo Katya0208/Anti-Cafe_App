@@ -1,6 +1,21 @@
-# backend/schemas.py
-
 from pydantic import BaseModel
+
+class User(BaseModel):
+    user_id: int
+    first_name: str
+    last_name: str
+    email: str
+    role_id: int
+    role_name: str
+
+    class Config:
+        orm_mode = True
+
+from datetime import datetime
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
 class UserRegister(BaseModel):
     first_name: str

@@ -12,7 +12,7 @@ load_dotenv()
 # Конфигурация подключения к базе данных
 DATABASE_CONFIG = {
     'user': os.getenv('POSTGRES_USER', 'katushka'),
-    'password': os.getenv('POSTGRES_PASSWORD', 'rfneirf2004'),  # Важно: Измените пароль для безопасности!
+    'password': os.getenv('POSTGRES_PASSWORD', 'rfneirf2004'),
     'database': os.getenv('POSTGRES_DB', 'anticafe'),
     'host': os.getenv('POSTGRES_HOST', '127.0.0.1'),
     'port': int(os.getenv('POSTGRES_PORT', 5432))
