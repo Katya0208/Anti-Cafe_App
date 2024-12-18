@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Optional
 
 class User(BaseModel):
     user_id: int
@@ -26,3 +27,18 @@ class UserRegister(BaseModel):
 class UserLogin(BaseModel):
     email: str
     password: str
+
+class BookingCreate(BaseModel):
+    resource_id: int
+    start_time: datetime
+    end_time: datetime
+    status: str
+
+class Booking(BaseModel):
+    booking_id: int
+    user_id: int
+    resource_id: int
+    start_time: datetime
+    end_time: datetime
+    status: str
+

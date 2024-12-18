@@ -31,7 +31,7 @@ class Booking(BaseModel):
     resource_id: int
     start_time: datetime
     end_time: datetime
-    status: str  # Например: 'active', 'completed', 'cancelled'
+    status: str  # 'active', 'completed', 'cancelled'
 
     class Config:
         orm_mode = True
@@ -47,10 +47,33 @@ class Resource(BaseModel):
     resource_id: Optional[int] = None  # ID ресурса, может отсутствовать при создании
     name: str  # Название ресурса
     description: Optional[str] = None  # Описание ресурса
+    hourly_rate: float
 
     class Config:
         orm_mode = True
 
 class ResourceCreate(BaseModel):
     name: str
-    description: str = None
+    description: Optional[str]
+    hourly_rate: float  # Новый атрибут для создания ресурса
+
+class SessionCreate(BaseModel):
+    user_id: int
+    start_time: datetime
+
+class Session(BaseModel):
+    session_id: int
+    user_id: int
+    start_time: datetime
+    end_time: Optional[datetime] = None
+
+class PaymentCreate(BaseModel):
+    user_id: int
+    amount: float
+    payment_date: datetime
+
+class Payment(BaseModel):
+    payment_id: int
+    user_id: int
+    amount: float
+    payment_date: datetime

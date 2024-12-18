@@ -1,16 +1,18 @@
-from typing import List  # Убедитесь, что импортировали List
+from typing import List, Dict  # Убедитесь, что импортировали List
 from fastapi import FastAPI, Depends, HTTPException, status
 from .database import init_db, close_db
 from .models import User, Token
 from .schemas import UserRegister, UserLogin as UserLoginSchema
 from .auth import verify_password, get_password_hash, create_access_token, oauth2_scheme
-from .models import User, Token, Booking, BookingCreate, Resource, ResourceCreate
+from .models import User, Token, Booking, BookingCreate, Resource, ResourceCreate, Session, SessionCreate, Payment, PaymentCreate
 from jose import JWTError, jwt
 from datetime import timedelta
 import logging
+from typing import Optional
 import os
 from datetime import datetime
 from dotenv import load_dotenv  # Для загрузки переменных окружения
+
 
 # Загрузка переменных окружения из .env файла
 load_dotenv()
@@ -145,8 +147,35 @@ def admin_required(token: str = Depends(oauth2_scheme)):
     except JWTError:
         raise HTTPException(status_code=403, detail="Доступ запрещён")
 
+def admin_staff_required(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        role = payload.get("role")
+        if (role != "admin") and (role != "staff"):
+            raise HTTPException(status_code=403, detail="Доступ запрещён")
+    except JWTError:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+def all_required(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        role = payload.get("role")
+        if (role != "admin") and (role != "client") and (role != "staff"):
+            raise HTTPException(status_code=403, detail="Доступ запрещён")
+    except JWTError:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+def staff_required(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        role = payload.get("role")
+        if (role != "staff"):
+            raise HTTPException(status_code=403, detail="Доступ запрещён")
+    except JWTError:
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
 # --- Маршруты для администраторов ---
-@app.get("/admin/users", dependencies=[Depends(admin_required)], response_model=List[User])
+@app.get("/admin/users", dependencies=[Depends(admin_staff_required)], response_model=List[User])
 async def get_users():
     """Получение всех пользователей"""
     pool = app.state.pool
@@ -169,7 +198,7 @@ async def get_users():
         for user in users
     ]
 
-@app.post("/admin/users", dependencies=[Depends(admin_required)])
+@app.post("/admin/users", dependencies=[Depends(admin_staff_required)])
 async def add_user(user: UserRegister):
     """Добавление нового пользователя"""
     try:
@@ -182,11 +211,16 @@ async def add_user(user: UserRegister):
                 raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует.")
             
             hashed_pw = get_password_hash(user.password)
-            # Вставка нового пользователя с ролью 'client'
+            # Проверка валидности роли
+            role = await conn.fetchrow("SELECT role_id FROM Roles WHERE role_id = $1", user.role_id)
+            if not role:
+                raise HTTPException(status_code=400, detail="Указанная роль не найдена.")
+            
+            # Вставка нового пользователя
             await conn.execute("""
                 INSERT INTO Users (first_name, last_name, email, password_hash, role_id)
-                VALUES ($1, $2, $3, $4, (SELECT role_id FROM Roles WHERE role_name = 'client'))
-            """, user.first_name, user.last_name, user.email, hashed_pw)
+                VALUES ($1, $2, $3, $4, $5)
+            """, user.first_name, user.last_name, user.email, hashed_pw, user.role_id)
         return {"message": "Пользователь успешно добавлен"}
     except HTTPException as he:
         logger.error(f"HTTPException: {he.detail}")
@@ -194,6 +228,15 @@ async def add_user(user: UserRegister):
     except Exception as e:
         logger.error(f"Ошибка при добавлении пользователя: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
+
+@app.get("/roles", dependencies=[Depends(admin_required)])
+async def get_roles():
+    """Получение списка ролей"""
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        roles = await conn.fetch("SELECT role_id, role_name FROM Roles")
+    return [dict(role) for role in roles]
+
 @app.delete("/admin/users/{user_id}", dependencies=[Depends(admin_required)])
 async def delete_user(user_id: int):
     """Удаление пользователя"""
@@ -207,7 +250,7 @@ async def delete_user(user_id: int):
 # --- Новые маршруты для бронирований ---
 
 # Получение всех бронирований
-@app.get("/admin/bookings", dependencies=[Depends(admin_required)], response_model=List[Booking])
+@app.get("/admin/bookings", dependencies=[Depends(all_required)], response_model=List[Booking])
 async def get_bookings():
     """Получение всех бронирований"""
     pool = app.state.pool
@@ -230,7 +273,7 @@ async def get_bookings():
     ]
 
 # Добавление нового бронирования
-@app.post("/admin/bookings", dependencies=[Depends(admin_required)], response_model=Booking, status_code=status.HTTP_201_CREATED)
+@app.post("/admin/bookings", dependencies=[Depends(all_required)], response_model=Booking, status_code=status.HTTP_201_CREATED)
 async def add_booking(booking: BookingCreate):
     """Добавление нового бронирования"""
     try:
@@ -280,6 +323,29 @@ async def add_booking(booking: BookingCreate):
         logger.error(f"Ошибка при добавлении бронирования: {e}")
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 
+async def create_booking(booking_data: Dict) -> Dict:
+    """Добавление нового бронирования через сервер"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{API_URL}/bookings",
+                json=booking_data,
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 201:
+                return {"message": "Бронирование успешно добавлено"}
+            else:
+                # Обработка ошибок от сервера
+                try:
+                    error_detail = response.json().get("detail", "Неизвестная ошибка")
+                except:
+                    error_detail = "Неизвестная ошибка"
+                return {"error": error_detail}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
 # Удаление бронирования
 @app.delete("/admin/bookings/{booking_id}", dependencies=[Depends(admin_required)])
 async def delete_booking(booking_id: int):
@@ -297,14 +363,58 @@ async def delete_booking(booking_id: int):
             raise HTTPException(status_code=500, detail="Ошибка при удалении бронирования.")
     return {"message": "Бронирование успешно удалено"}
 
+@app.get("/user/bookings", response_model=List[Booking], dependencies=[Depends(all_required)])
+async def get_user_bookings(user_id: Optional[int] = None):
+    """
+    Получение бронирований пользователя.
+    Если user_id не указан, возвращаются все бронирования.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+
+    async with pool.acquire() as conn:
+        if user_id:
+            bookings = await conn.fetch("""
+                SELECT booking_id, user_id, resource_id, start_time, end_time, status
+                FROM Bookings
+                WHERE user_id = $1
+                ORDER BY start_time DESC
+            """, user_id)
+        else:
+            bookings = await conn.fetch("""
+                SELECT booking_id, user_id, resource_id, start_time, end_time, status
+                FROM Bookings
+                ORDER BY start_time DESC
+            """)
+
+    return [
+        Booking(
+            booking_id=booking['booking_id'],
+            user_id=booking['user_id'],
+            resource_id=booking['resource_id'],
+            start_time=booking['start_time'],
+            end_time=booking['end_time'],
+            status=booking['status'],
+        )
+        for booking in bookings
+    ]
+
 @app.get("/admin/resources", response_model=List[Resource])
 async def get_resources(token: str = Depends(oauth2_scheme)):
     """Получение списка ресурсов"""
     pool = app.state.pool
     async with pool.acquire() as conn:
-        resources = await conn.fetch("SELECT resource_id, name, description FROM Resources")
-    return [{"resource_id": resource["resource_id"], "name": resource["name"], "description": resource["description"]} for resource in resources]
-
+        resources = await conn.fetch("SELECT resource_id, name, description, hourly_rate FROM Resources")
+    return [
+        {
+            "resource_id": resource["resource_id"],
+            "name": resource["name"],
+            "description": resource["description"],
+            "hourly_rate": resource["hourly_rate"]
+        }
+        for resource in resources
+    ]
 
 
 @app.post("/admin/resources", response_model=dict)
@@ -313,9 +423,9 @@ async def add_resource(resource: ResourceCreate, token: str = Depends(oauth2_sch
     pool = app.state.pool
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO Resources (name, description)
-            VALUES ($1, $2)
-        """, resource.name, resource.description)
+            INSERT INTO Resources (name, description, hourly_rate)
+            VALUES ($1, $2, $3)
+        """, resource.name, resource.description, resource.hourly_rate)
     return {"message": "Ресурс успешно добавлен"}
 
 @app.delete("/admin/resources/{resource_id}", response_model=dict)
@@ -400,3 +510,331 @@ async def delete_payment(payment_id: int):
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM Payments WHERE payment_id = $1", payment_id)
     return {"message": "Платеж успешно удалён"}
+
+from datetime import datetime
+
+@app.get("/resources/bookings")
+async def get_resource_bookings(resource_id: int, date: str, token: str = Depends(oauth2_scheme)):
+    """
+    Получение бронирований ресурса на определённую дату.
+    """
+    try:
+        # Преобразование строки даты в объект datetime.date
+        booking_date = datetime.strptime(date, "%Y-%m-%d").date()
+
+        pool = app.state.pool
+        async with pool.acquire() as conn:
+            bookings = await conn.fetch("""
+                SELECT booking_id, user_id, resource_id, start_time, end_time, status
+                FROM Bookings
+                WHERE resource_id = $1 AND DATE(start_time) = $2
+            """, resource_id, booking_date)
+
+        return [
+            {
+                "booking_id": booking["booking_id"],
+                "user_id": booking["user_id"],
+                "resource_id": booking["resource_id"],
+                "start_time": booking["start_time"],
+                "end_time": booking["end_time"],
+                "status": booking["status"],
+            }
+            for booking in bookings
+        ]
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=f"Некорректный формат даты: {ve}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {e}")
+
+
+@app.post("/staff/sessions/start", response_model=Session)
+async def start_session(session: SessionCreate, staff: User = Depends(staff_required)):
+    """
+    Установка начала сессии посещения пользователя.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+    
+    async with pool.acquire() as conn:
+        # Проверка существующих открытых сессий
+        existing_session = await conn.fetchrow("""
+            SELECT * FROM Sessions
+            WHERE user_id = $1 AND end_time IS NULL
+        """, session.user_id)
+        
+        if existing_session:
+            raise HTTPException(status_code=400, detail="У пользователя уже есть открытая сессия.")
+        
+        # Создание новой сессии
+        session_id = await conn.fetchval("""
+            INSERT INTO Sessions (user_id, start_time)
+            VALUES ($1, $2)
+            RETURNING session_id
+        """, session.user_id, session.start_time)
+        
+        new_session = Session(
+            session_id=session_id,
+            user_id=session.user_id,
+            start_time=session.start_time,
+            end_time=None
+        )
+        return new_session
+
+@app.post("/staff/sessions/end", response_model=Session)
+async def end_session(session_id: int, end_time: datetime, staff: User = Depends(staff_required)):
+    """
+    Установка конца сессии посещения пользователя.
+    Если есть активное бронирование, оно автоматически завершается.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+    
+    async with pool.acquire() as conn:
+        # Получение сессии
+        session = await conn.fetchrow("""
+            SELECT * FROM Sessions
+            WHERE session_id = $1 AND end_time IS NULL
+        """, session_id)
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="Активная сессия не найдена.")
+        
+        # Обновление конца сессии
+        await conn.execute("""
+            UPDATE Sessions
+            SET end_time = $1
+            WHERE session_id = $2
+        """, end_time, session_id)
+        
+        # Проверка наличия активного бронирования
+        active_booking = await conn.fetchrow("""
+            SELECT * FROM Bookings
+            WHERE user_id = $1 AND status = 'active'
+            ORDER BY start_time DESC
+            LIMIT 1
+        """, session['user_id'])
+        
+        if active_booking:
+            # Завершение бронирования
+            await conn.execute("""
+                UPDATE Bookings
+                SET status = 'completed'
+                WHERE booking_id = $1
+            """, active_booking['booking_id'])
+        
+        updated_session = Session(
+            session_id=session_id,
+            user_id=session['user_id'],
+            start_time=session['start_time'],
+            end_time=end_time
+        )
+        return updated_session
+
+# 2. Управление бронированиями
+@app.get("/staff/users/{user_id}/bookings", response_model=List[Booking])
+async def get_user_bookings_staff(user_id: int, staff: User = Depends(staff_required)):
+    """
+    Получение бронирований конкретного пользователя.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+    
+    async with pool.acquire() as conn:
+        bookings = await conn.fetch("""
+            SELECT booking_id, user_id, resource_id, start_time, end_time, status
+            FROM Bookings
+            WHERE user_id = $1
+            ORDER BY start_time DESC
+        """, user_id)
+    
+    return [
+        Booking(
+            booking_id=booking['booking_id'],
+            user_id=booking['user_id'],
+            resource_id=booking['resource_id'],
+            start_time=booking['start_time'],
+            end_time=booking['end_time'],
+            status=booking['status'],
+        )
+        for booking in bookings
+    ]
+
+@app.patch("/staff/bookings/{booking_id}/cancel", response_model=Booking)
+async def cancel_booking_staff(booking_id: int, staff: User = Depends(staff_required)):
+    """
+    Изменение статуса бронирования на 'cancelled'.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+    
+    async with pool.acquire() as conn:
+        # Получение бронирования
+        booking = await conn.fetchrow("""
+            SELECT * FROM Bookings
+            WHERE booking_id = $1
+        """, booking_id)
+        
+        if not booking:
+            raise HTTPException(status_code=404, detail="Бронирование не найдено.")
+        
+        if booking['status'] == 'cancelled':
+            raise HTTPException(status_code=400, detail="Бронирование уже отменено.")
+        
+        # Обновление статуса бронирования
+        await conn.execute("""
+            UPDATE Bookings
+            SET status = 'cancelled'
+            WHERE booking_id = $1
+        """, booking_id)
+        
+        # Возврат обновленного бронирования
+        updated_booking = await conn.fetchrow("""
+            SELECT booking_id, user_id, resource_id, start_time, end_time, status
+            FROM Bookings
+            WHERE booking_id = $1
+        """, booking_id)
+    
+    return Booking(
+        booking_id=updated_booking['booking_id'],
+        user_id=updated_booking['user_id'],
+        resource_id=updated_booking['resource_id'],
+        start_time=updated_booking['start_time'],
+        end_time=updated_booking['end_time'],
+        status=updated_booking['status'],
+    )
+
+# 3. Управление платежами
+
+@app.get("/staff/users/{user_id}/payments", response_model=List[Payment])
+async def get_user_payments(user_id: int, staff: User = Depends(staff_required)):
+    """
+    Получение платежей пользователя.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+    
+    async with pool.acquire() as conn:
+        payments = await conn.fetch("""
+            SELECT payment_id, user_id, amount, payment_date
+            FROM Payments
+            WHERE user_id = $1
+            ORDER BY payment_date DESC
+        """, user_id)
+    
+    return [
+        Payment(
+            payment_id=payment['payment_id'],
+            user_id=payment['user_id'],
+            amount=payment['amount'],
+            payment_date=payment['payment_date'],
+        )
+        for payment in payments
+    ]
+
+@app.post("/staff/users/{user_id}/payments", response_model=Payment, status_code=201)
+async def add_user_payment(user_id: int, payment: PaymentCreate, staff: User = Depends(staff_required)):
+    """
+    Добавление нового платежа для пользователя.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+    
+    async with pool.acquire() as conn:
+        # Проверка существования пользователя
+        user = await conn.fetchrow("""
+            SELECT * FROM Users
+            WHERE user_id = $1
+        """, user_id)
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="Пользователь не найден.")
+        
+        # Создание платежа
+        payment_id = await conn.fetchval("""
+            INSERT INTO Payments (user_id, amount, payment_date)
+            VALUES ($1, $2, $3)
+            RETURNING payment_id
+        """, user_id, payment.amount, payment.payment_date)
+        
+        new_payment = Payment(
+            payment_id=payment_id,
+            user_id=user_id,
+            amount=payment.amount,
+            payment_date=payment.payment_date,
+        )
+        return new_payment
+
+# main.py
+
+@app.get("/staff/sessions/active", response_model=Optional[Session], dependencies=[Depends(staff_required)])
+async def get_active_session(user_id: int):
+    """
+    Получение активной сессии пользователя.
+    """
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+    
+    async with pool.acquire() as conn:
+        session = await conn.fetchrow("""
+            SELECT session_id, user_id, start_time, end_time
+            FROM Sessions
+            WHERE user_id = $1 AND end_time IS NULL
+        """, user_id)
+    
+    if session:
+        return Session(
+            session_id=session['session_id'],
+            user_id=session['user_id'],
+            start_time=session['start_time'],
+            end_time=session['end_time']
+        )
+    else:
+        return None
+
+@app.patch("/staff/bookings/{booking_id}/complete", response_model=Booking)
+async def complete_booking_staff(booking_id: int, staff: User = Depends(staff_required)):
+    pool = app.state.pool
+    if pool is None:
+        raise HTTPException(status_code=500, detail="Пул соединений не инициализирован.")
+
+    async with pool.acquire() as conn:
+        booking = await conn.fetchrow("SELECT * FROM bookings WHERE booking_id = $1", booking_id)
+        if not booking:
+            raise HTTPException(status_code=404, detail="Бронирование не найдено.")
+
+        if booking['status'] == 'completed':
+            raise HTTPException(status_code=400, detail="Бронирование уже завершено.")
+
+        await conn.execute("""
+            UPDATE bookings
+            SET status = 'completed'
+            WHERE booking_id = $1
+        """, booking_id)
+
+        updated_booking = await conn.fetchrow("""
+            SELECT booking_id, user_id, resource_id, start_time, end_time, status
+            FROM bookings WHERE booking_id = $1
+        """, booking_id)
+
+    return Booking(
+        booking_id=updated_booking['booking_id'],
+        user_id=updated_booking['user_id'],
+        resource_id=updated_booking['resource_id'],
+        start_time=updated_booking['start_time'],
+        end_time=updated_booking['end_time'],
+        status=updated_booking['status']
+    )
+
+@app.get("/logs/sessions")
+async def get_session_logs():
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        logs = await conn.fetch("SELECT * FROM session_logs")
+        return [{"id": log["log_id"], "user_id": log["user_id"], "event_type": log["event_type"], "event_time": log["event_time"]} for log in logs]
