@@ -57,9 +57,63 @@ CREATE TABLE Bookings (
     status VARCHAR(50) DEFAULT 'pending'
 );
 
--- Таблица резервных копий
-CREATE TABLE Backups (
-    backup_id SERIAL PRIMARY KEY,
-    backup_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    file_path VARCHAR(255) NOT NULL
+-- Таблица для логирования сессий
+CREATE TABLE session_logs (
+    log_id SERIAL PRIMARY KEY,
+    session_id INT NOT NULL,
+    user_id INT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('start', 'end')),
+    event_time TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Таблица для логирования бронирований
+CREATE TABLE booking_logs (
+    log_id SERIAL PRIMARY KEY,
+    booking_id INT NOT NULL,
+    user_id INT NOT NULL,
+    resource_id INT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('completed')),
+    event_time TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- Функция для логирования начала сессии
+CREATE OR REPLACE FUNCTION log_session_start()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO session_logs (session_id, user_id, event_type, event_time)
+    VALUES (NEW.session_id, NEW.user_id, 'start', NOW());
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Функция для логирования конца сессии
+CREATE OR REPLACE FUNCTION log_session_end()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.end_time IS NOT NULL AND OLD.end_time IS NULL THEN
+        INSERT INTO session_logs (session_id, user_id, event_type, event_time)
+        VALUES (NEW.session_id, NEW.user_id, 'end', NOW());
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Триггер на INSERT для логирования начала сессии
+CREATE TRIGGER trg_session_start
+AFTER INSERT ON sessions
+FOR EACH ROW
+EXECUTE FUNCTION log_session_start();
+
+-- Триггер на UPDATE для логирования окончания сессии
+CREATE TRIGGER trg_session_end
+AFTER UPDATE ON sessions
+FOR EACH ROW
+WHEN (OLD.end_time IS NULL AND NEW.end_time IS NOT NULL)
+EXECUTE FUNCTION log_session_end();
+
+CREATE TRIGGER trg_booking_completed
+AFTER UPDATE ON bookings
+FOR EACH ROW
+WHEN (OLD.status IS DISTINCT FROM 'completed' AND NEW.status = 'completed')
+EXECUTE FUNCTION log_booking_completed();
+

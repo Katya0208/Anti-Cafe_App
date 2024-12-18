@@ -5,8 +5,9 @@ import httpx
 from typing import Dict
 import asyncio
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List
+from typing import Optional
 
 # Настройки Backend API
 API_URL = "http://127.0.0.1:8000"
@@ -47,7 +48,7 @@ async def login_user(email, password):
         try:
             response = await client.post(
                 f"{API_URL}/login",
-                json={  # Используем json для передачи данных
+                json={  # json для передачи данных
                     "email": email,
                     "password": password
                 }
@@ -73,9 +74,11 @@ async def get_current_user(token):
         except Exception as e:
             return False, str(e)
 
+
+
 def admin_page():
     st.title("Страница администратора")
-    menu = ["Пользователи", "Бронирования", "Сессии", "Платежи", "Ресурсы", "Резервные копии"]
+    menu = ["Пользователи", "Бронирования", "Сессии", "Платежи", "Ресурсы", "Логи"]
     choice = st.sidebar.selectbox("Меню администратора", menu)
 
     if choice == "Пользователи":
@@ -88,7 +91,8 @@ def admin_page():
         manage_sessions()
     elif choice == "Платежи":
         manage_payments()
-    # Добавьте остальные функции (Бронирования, Сессии и т.д.)
+    elif choice == "Логи":
+        manage_logs()
 
 async def fetch_users() -> Dict:
     """Получение списка пользователей с сервера"""
@@ -112,6 +116,48 @@ async def fetch_users() -> Dict:
     except Exception as e:
         return {"error": f"Неизвестная ошибка: {str(e)}"}
 
+async def fetch_session_logs() -> List[Dict]:
+    """Получение логов сессий."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_URL}/logs/sessions",
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                try:
+                    error_detail = response.json().get("detail", response.text)
+                except:
+                    error_detail = "Неизвестная ошибка"
+                return {"error": error_detail}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+def manage_logs():
+    st.write("Логи системы")
+    if st.button("Показать логи сессий"):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        session_logs = loop.run_until_complete(fetch_session_logs())
+        loop.close()
+
+        if isinstance(session_logs, dict) and "error" in session_logs:
+            st.error(session_logs["error"])
+        else:
+            # Преобразуем логи в DataFrame
+            df_logs = pd.DataFrame(session_logs)
+            if not df_logs.empty:
+                # Преобразуем колонку event_time в читаемый формат
+                if 'event_time' in df_logs.columns:
+                    df_logs['event_time'] = pd.to_datetime(df_logs['event_time'])
+                st.dataframe(df_logs)
+            else:
+                st.info("Логи сессий отсутствуют.")
+
 async def add_user(user_data: Dict) -> Dict:
     """Добавление нового пользователя через сервер"""
     try:
@@ -134,7 +180,7 @@ async def add_user(user_data: Dict) -> Dict:
         return {"error": f"Ошибка HTTP: {str(http_err)}"}
     except Exception as e:
         return {"error": f"Неизвестная ошибка: {str(e)}"}
-
+        
 async def delete_user(user_id: int) -> Dict:
     """Удаление пользователя через сервер"""
     try:
@@ -156,6 +202,13 @@ async def delete_user(user_id: int) -> Dict:
         return {"error": f"Ошибка HTTP: {str(http_err)}"}
     except Exception as e:
         return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def fetch_roles():
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{API_URL}/roles", headers={
+            "Authorization": f"Bearer {st.session_state['token']}"
+        })
+        return response.json()
 
 def manage_users():
     st.subheader("База пользователей")
@@ -179,14 +232,29 @@ def manage_users():
     last_name = st.text_input("Фамилия", key="add_user_last_name")
     email = st.text_input("Email", key="add_user_email")
     password = st.text_input("Пароль", type="password", key="add_user_password")
-    
+
+    # Получение списка ролей
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    roles = loop.run_until_complete(fetch_roles())
+    loop.close()
+
+    if "error" in roles:
+        st.error(roles["error"])
+        roles = []
+    else:
+        role_options = {role["role_name"]: role["role_id"] for role in roles}
+        selected_role = st.selectbox("Выберите роль пользователя", list(role_options.keys()))
+        selected_role_id = role_options[selected_role] if roles else None
+
     if st.button("Добавить пользователя", key="add_user_button"):
-        if first_name and last_name and email and password:
+        if first_name and last_name and email and password and selected_role_id:
             user_data = {
                 "first_name": first_name,
                 "last_name": last_name,
                 "email": email,
-                "password": password
+                "password": password,
+                "role_id": selected_role_id
             }
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -245,6 +313,8 @@ def manage_users():
     if "delete_message" in st.session_state:
         st.success(st.session_state["delete_message"])
         del st.session_state["delete_message"]
+
+
 
 async def fetch_bookings() -> Dict:
     """Получение списка бронирований с сервера"""
@@ -342,8 +412,6 @@ def manage_bookings():
 
     # Форма для добавления бронирования
     st.write("Добавить новое бронирование")
-    # user_id = st.number_input("ID пользователя", min_value=1, step=1, key="booking_user_id")
-    # resource_id = st.number_input("ID ресурса", min_value=1, step=1, key="booking_resource_id")
     # Запрос пользователей и ресурсов с сервера
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -506,14 +574,15 @@ def manage_resources():
     # Форма для добавления ресурса
     st.write("Добавить новый ресурс")
     resource_name = st.text_input("Название ресурса", key="add_resource_name")
-    # resource_type = st.text_input("Тип ресурса", key="add_resource_type")
     resource_description = st.text_area("Описание ресурса", key="add_resource_description")
+    hourly_rate = st.number_input("Стоимость за час", min_value=0.0, step=0.1, key="add_resource_hourly_rate")
 
     if st.button("Добавить ресурс"):
         if resource_name:
             resource_data = {
                 "name": resource_name,
-                "description": resource_description
+                "description": resource_description,
+                "hourly_rate": hourly_rate
             }
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -944,6 +1013,628 @@ def manage_payments():
         else:
             st.info("Нет доступных платежей для удаления.")
 
+def calculate_free_windows(bookings, start_hour=10, end_hour=1):
+    """
+    Рассчитать свободные окна для ресурса с учётом рабочего времени (10:00 до 01:00 следующего дня).
+    Если end_hour <= start_hour, считаем, что конец рабочего дня наступает на следующий день.
+    """
+
+    # Базовая дата для расчётов (можно любую дату, важны только время)
+    base_date = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Начало
+    work_start = base_date + timedelta(hours=start_hour)
+
+    # Конец
+    if end_hour <= start_hour:
+        hours_to_end = 24 - (start_hour - end_hour)
+        work_end = work_start + timedelta(hours=hours_to_end)
+    else:
+        
+        work_end = base_date + timedelta(hours=end_hour)
+        if work_end <= work_start:
+            work_end += timedelta(days=1)
+
+    # Преобразуем бронирования в datetime и сортируем
+    reserved_windows = []
+    for booking in bookings:
+        try:
+            reserved_start = datetime.fromisoformat(booking["start_time"])
+            reserved_end = datetime.fromisoformat(booking["end_time"])
+            reserved_windows.append((reserved_start, reserved_end))
+        except Exception:
+            continue
+
+    reserved_windows.sort()
+
+    free_windows = []
+    current_start = work_start
+
+    for reserved_start, reserved_end in reserved_windows:
+        # Если начало брони позже current_start — есть свободный промежуток
+        if reserved_start > current_start:
+            free_windows.append({
+                "start": current_start.strftime("%H:%M"),
+                "end": reserved_start.strftime("%H:%M")
+            })
+        current_start = max(current_start, reserved_end)
+
+    # Проверка свободного времени после последнего бронирования до конца рабочего дня
+    if current_start < work_end:
+        free_windows.append({
+            "start": current_start.strftime("%H:%M"),
+            "end": work_end.strftime("%H:%M")
+        })
+
+    return free_windows
+async def fetch_resource_bookings(resource_id: int, date: str) -> List[Dict]:
+    """Получение информации о бронированиях ресурса на определённую дату."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{API_URL}/resources/bookings",
+            params={"resource_id": resource_id, "date": date},
+            headers={"Authorization": f"Bearer {st.session_state['token']}"}
+        )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"error": response.text}
+
+async def fetch_user_bookings() -> List[Dict]:
+    """Получение бронирований текущего пользователя."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_URL}/user/bookings",
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def fetch_user_bookings_staff(user_id: int) -> List[Dict]:
+    """Получение бронирований конкретного пользователя (для staff)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_URL}/staff/users/{user_id}/bookings",
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def cancel_booking_staff(booking_id: int) -> Dict:
+    """Отмена бронирования (для staff)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{API_URL}/staff/bookings/{booking_id}/cancel",
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def fetch_user_payments(user_id: int) -> List[Dict]:
+    """Получение платежей пользователя (для staff)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_URL}/staff/users/{user_id}/payments",
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def add_user_payment(user_id: int, payment: Dict) -> Dict:
+    """Добавление нового платежа для пользователя (для staff)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{API_URL}/staff/users/{user_id}/payments",
+                json=payment,
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 201:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def start_session_staff(user_id: int, start_time: str) -> Dict:
+    """Установка начала сессии для пользователя (для staff)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            session_data = {
+                "user_id": user_id,
+                "start_time": start_time
+            }
+            response = await client.post(
+                f"{API_URL}/staff/sessions/start",
+                json=session_data,
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def end_session_staff(session_id: int, end_time: str) -> Dict:
+    """Установка конца сессии для пользователя (для staff)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{API_URL}/staff/sessions/end",
+                params={"session_id": session_id, "end_time": end_time},
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def complete_booking_staff(booking_id: int) -> Dict:
+    """Завершение бронирования (установка статуса 'completed')."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.patch(
+                f"{API_URL}/staff/bookings/{booking_id}/complete",
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                try:
+                    error_detail = response.json().get("detail", response.text)
+                except:
+                    error_detail = "Неизвестная ошибка"
+                return {"error": error_detail}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+async def fetch_all_users() -> List[Dict]:
+    """Получение списка всех пользователей (для staff)."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_URL}/admin/users",
+                headers={"Authorization": f"Bearer {st.session_state['token']}"}
+            )
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"error": response.text}
+    except httpx.HTTPError as http_err:
+        return {"error": f"Ошибка HTTP: {str(http_err)}"}
+    except Exception as e:
+        return {"error": f"Неизвестная ошибка: {str(e)}"}
+
+# --- Страница Staff ---
+def staff_page():
+    st.title("Страница Сотрудника")
+    
+    # --- Выбор пользователя ---
+    st.subheader("Выбор пользователя")
+    
+    # Загрузка списка пользователей
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    users = loop.run_until_complete(fetch_all_users())
+    loop.close()
+    
+    if "error" in users:
+        st.error(users["error"])
+        users = []
+    
+    if users:
+        user_options = {f"{user['first_name']} {user['last_name']} (ID: {user['user_id']})": user['user_id'] for user in users}
+        selected_user_display = st.selectbox("Выберите пользователя", list(user_options.keys()))
+        selected_user_id = user_options[selected_user_display]
+    else:
+        st.warning("Нет доступных пользователей.")
+        return
+    
+    st.markdown("---")
+    
+    # --- Управление сессией ---
+    st.subheader("Управление сессией пользователя")
+    
+    # Получение активных сессий пользователя
+    async def fetch_active_session(user_id: int) -> Optional[Dict]:
+        """Получение активной сессии пользователя."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{API_URL}/staff/sessions/active",
+                    params={"user_id": user_id},
+                    headers={"Authorization": f"Bearer {st.session_state['token']}"}
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return data if data else None
+                else:
+                    return {"error": response.text}
+        except httpx.HTTPError as http_err:
+            return {"error": f"Ошибка HTTP: {str(http_err)}"}
+        except Exception as e:
+            return {"error": f"Неизвестная ошибка: {str(e)}"}
+    
+
+    # Проверяем наличие активной сессии
+    # Здесь предполагается, что такой маршрут существует
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    active_session = loop.run_until_complete(fetch_active_session(selected_user_id))
+    loop.close()
+    
+    if active_session and "error" not in active_session:
+        st.info(f"Активная сессия: Начало - {active_session['start_time']}")
+        if st.button("Установить конец сессии"):
+            # Используйте st.date_input и st.time_input для выбора даты и времени
+            end_date = st.date_input("Выберите дату окончания сессии", value=datetime.now().date())
+            end_time = st.time_input("Выберите время окончания сессии", value=datetime.now().time())
+            end_datetime = datetime.combine(end_date, end_time)
+            end_time_iso = end_datetime.isoformat()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            response = loop.run_until_complete(end_session_staff(active_session['session_id'], end_time_iso))
+            loop.close()
+            if "error" in response:
+                st.error(response["error"])
+            else:
+                st.success("Конец сессии успешно установлен.")
+                st.rerun()
+    else:
+        st.warning("У пользователя нет активных сессий.")
+        if st.button("Установить начало сессии"):
+            start_date = st.date_input("Выберите дату начала сессии", value=datetime.now().date())
+            start_time = st.time_input("Выберите время начала сессии", value=datetime.now().time())
+            start_datetime = datetime.combine(start_date, start_time)
+            start_time_iso = start_datetime.isoformat()
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            response = loop.run_until_complete(start_session_staff(selected_user_id, start_time_iso))
+            loop.close()
+            if "error" in response:
+                st.error(response["error"])
+            else:
+                st.success("Начало сессии успешно установлено.")
+                st.rerun()
+    
+    st.markdown("---")
+    
+    # --- Просмотр и управление бронированиями ---
+    st.subheader("Просмотр и управление бронированиями пользователя")
+    
+    if st.button("Показать бронирования пользователя"):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        user_bookings = loop.run_until_complete(fetch_user_bookings_staff(selected_user_id))
+        loop.close()
+        
+        if "error" in user_bookings:
+            st.error(user_bookings["error"])
+        else:
+            if user_bookings:
+                # Запрос ресурсов для сопоставления resource_id с именами
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                resources = loop.run_until_complete(fetch_resources())
+                loop.close()
+        
+                resource_dict = {resource['resource_id']: resource['name'] for resource in resources} if resources and "error" not in resources else {}
+        
+                # Преобразуем данные в DataFrame для удобного отображения
+                df_user_bookings = pd.DataFrame(user_bookings)
+                # Преобразуем столбцы с датой и временем в читаемый формат
+                df_user_bookings['start_time'] = pd.to_datetime(df_user_bookings['start_time']).dt.strftime('%Y-%m-%d %H:%M')
+                df_user_bookings['end_time'] = pd.to_datetime(df_user_bookings['end_time']).dt.strftime('%Y-%m-%d %H:%M')
+                # Добавим название ресурса
+                df_user_bookings['resource_name'] = df_user_bookings['resource_id'].map(resource_dict).fillna('Неизвестный ресурс')
+                
+                # Добавим колонку с кнопками для отмены бронирования
+                for index, row in df_user_bookings.iterrows():
+                    if row['status'] != 'cancelled':
+                        if st.button(f"Отменить бронирование ID: {row['booking_id']}"):
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            response = loop.run_until_complete(cancel_booking_staff(row['booking_id']))
+                            loop.close()
+                            if "error" in response:
+                                st.error(response["error"])
+                            else:
+                                st.success(f"Бронирование ID: {row['booking_id']} отменено.")
+                                st.rerun()
+                
+                st.dataframe(df_user_bookings[['booking_id', 'resource_name', 'start_time', 'end_time', 'status']])
+            else:
+                st.info("У пользователя нет бронирований.")
+    
+    st.markdown("---")
+    
+    # --- Управление платежами ---
+    st.subheader("Просмотр и добавление платежей пользователя")
+    
+    if st.button("Показать платежи пользователя"):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        user_payments = loop.run_until_complete(fetch_user_payments(selected_user_id))
+        loop.close()
+        
+        if "error" in user_payments:
+            st.error(user_payments["error"])
+        else:
+            if user_payments:
+                df_user_payments = pd.DataFrame(user_payments)
+                df_user_payments['payment_date'] = pd.to_datetime(df_user_payments['payment_date']).dt.strftime('%Y-%m-%d %H:%M')
+                st.dataframe(df_user_payments[['payment_id', 'amount', 'payment_date']])
+            else:
+                st.info("У пользователя нет платежей.")
+    
+    st.markdown("---")
+    
+    st.subheader("Добавить платеж пользователя")
+    
+    with st.form("add_payment_form"):
+        payment_amount = st.number_input("Сумма платежа (руб)", min_value=0.0, step=10.0)
+        payment_date = st.date_input("Дата платежа", value=datetime.now().date())
+        payment_time = st.time_input("Время платежа", value=datetime.now().time())
+        payment_datetime = datetime.combine(payment_date, payment_time)
+        submitted = st.form_submit_button("Добавить платеж")
+        if submitted:
+            if payment_amount <= 0:
+                st.error("Сумма платежа должна быть положительной.")
+            else:
+                payment_data = {
+                    "user_id": selected_user_id,
+                    "amount": payment_amount,
+                    "payment_date": payment_datetime.isoformat()
+                }
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                response = loop.run_until_complete(add_user_payment(selected_user_id, payment_data))
+                loop.close()
+                if "error" in response:
+                    st.error(response["error"])
+                else:
+                    st.success("Платеж успешно добавлен.")
+                    st.rerun()
+    
+    st.markdown("---")
+    
+    # --- Расчет стоимости посещения ---
+    st.subheader("Расчет стоимости посещения пользователя")
+    
+    if st.button("Рассчитать стоимость"):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        active_session = loop.run_until_complete(fetch_active_session(selected_user_id))
+        loop.close()
+
+        if active_session and "error" not in active_session:
+            session_start = datetime.fromisoformat(active_session['start_time'])
+            session_duration = datetime.now() - session_start
+            session_minutes = int(session_duration.total_seconds() // 60)
+        else:
+            session_minutes = 0
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        active_bookings = loop.run_until_complete(fetch_user_bookings_staff(selected_user_id))
+        loop.close()
+
+        if "error" in active_bookings:
+            st.error(active_bookings["error"])
+            active_bookings = []
+
+        # Получаем ресурсы для определения hourly_rate
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        resources_data = loop.run_until_complete(fetch_resources())
+        loop.close()
+
+        if "error" in resources_data:
+            st.error(resources_data["error"])
+            resources_data = []
+        
+        # Создаём словарь id ресурса -> hourly_rate
+        resource_price = {}
+        for r in resources_data:
+            resource_price[r['resource_id']] = r['hourly_rate']
+
+        # Рассчитываем стоимость бронирований
+        active_booking_minutes = 0
+        booking_cost = 0.0
+        for booking in active_bookings:
+            if booking['status'] == 'active':
+                booking_start = datetime.fromisoformat(booking['start_time'])
+                booking_end = datetime.fromisoformat(booking['end_time'])
+                booking_duration = booking_end - booking_start
+                b_minutes = int(booking_duration.total_seconds() // 60)
+                active_booking_minutes += b_minutes
+
+                # Получаем цену ресурса
+                r_id = booking['resource_id']
+                if r_id in resource_price:
+                    hourly_rate = resource_price[r_id]
+                else:
+                    hourly_rate = 0.0
+                
+                # Цена за бронирование = (минуты / 60) * hourly_rate
+                booking_cost += (b_minutes / 60) * hourly_rate
+
+                # Завершаем бронирование, устанавливаем статус 'completed'
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                complete_response = loop.run_until_complete(complete_booking_staff(booking['booking_id']))
+                loop.close()
+                if "error" in complete_response:
+                    st.error(complete_response["error"])
+
+        # Стоимость сессии
+        rate_per_minute = 5  # 5 руб/минута
+        session_cost = session_minutes * rate_per_minute
+
+        # Общая стоимость
+        total_cost = booking_cost + session_cost
+
+        # Проверка на стоп-чек
+        stop_check_hours = 3
+        stop_check_max = 900  # руб
+        if (session_minutes + active_booking_minutes) > stop_check_hours * 60:
+            total_cost = stop_check_max
+            st.info(f"Общее время превышает {stop_check_hours} часов. Применен стоп-чек: {stop_check_max} рублей.")
+
+        st.success(f"Общая стоимость пребывания: {total_cost} рублей.")
+
+def user_page():
+
+    st.title("Бронирование оборудования и помещений")
+
+    # Запрос ресурсов с сервера
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    resources = loop.run_until_complete(fetch_resources())
+    loop.close()
+
+    if "error" in resources:
+        st.error(resources["error"])
+        return
+
+    # Выпадающий список ресурсов
+    if resources:
+        resource_options = {f"{resource['name']} (Стоимость: {resource['hourly_rate']} руб/час)": resource['resource_id'] for resource in resources}
+        selected_resource_name = st.selectbox("Выберите ресурс для бронирования", list(resource_options.keys()))
+        selected_resource_id = resource_options[selected_resource_name]
+    else:
+        st.warning("Нет доступных ресурсов для бронирования.")
+        return
+
+    # Выбор даты
+    selected_date = st.date_input("Выберите дату бронирования", min_value=datetime.today().date())
+    
+    if st.button("Показать занятые окна"):
+        # Запрос информации о бронированиях
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        bookings = loop.run_until_complete(fetch_resource_bookings(selected_resource_id, selected_date.isoformat()))
+        loop.close()
+
+        if "error" in bookings:
+            st.error(bookings["error"])
+        else:
+            # Вывод занятых интервалов бронирования
+            if bookings:
+                st.write("Занятые интервалы бронирования:")
+                bookings.sort(key=lambda x: x["start_time"])
+                for booking in bookings:
+                    start_time = datetime.fromisoformat(booking["start_time"]).strftime("%H:%M")
+                    end_time = datetime.fromisoformat(booking["end_time"]).strftime("%H:%M")
+                    st.write(f"{start_time} - {end_time}")
+            else:
+                st.warning("На выбранную дату ресурс не забронирован. Он свободен в течение всего рабочего дня (10:00 - 01:00).")
+
+    st.markdown("---")
+
+    # Форма для добавления бронирования
+    st.subheader("Создать бронирование")
+
+    # Проверим, что пользователь авторизован и есть его данные
+    if 'user' not in st.session_state or st.session_state['user'] is None:
+        st.error("Сначала войдите в систему, чтобы сделать бронирование.")
+        return
+    
+    user_id = st.session_state['user']['user_id']
+    # Выбор времени начала и конца бронирования
+    start_time = st.time_input("Время начала бронирования", key="user_booking_start_time")
+    end_time = st.time_input("Время окончания бронирования", key="user_booking_end_time")
+
+    # Комбинируем выбранную дату и время
+    start_datetime = datetime.combine(selected_date, start_time)
+    end_datetime = datetime.combine(selected_date, end_time)
+    
+    if st.button("Забронировать"):
+        if end_datetime <= start_datetime:
+            st.error("Время окончания должно быть позже времени начала.")
+        else:
+            # Добавление бронирования
+            booking_data = {
+                "user_id": user_id,
+                "resource_id": selected_resource_id,
+                "start_time": start_datetime.isoformat(),
+                "end_time": end_datetime.isoformat(),
+                "status": "active"
+            }
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            response = loop.run_until_complete(add_booking(booking_data))
+            loop.close()
+
+            if "message" in response:
+                st.success(response["message"])
+                st.rerun()  # Обновление страницы после добавления
+            elif "error" in response:
+                st.error(response["error"])
+            else:
+                st.error("Ошибка при добавлении бронирования.")
+
+    st.markdown("---")
+    st.subheader("Рассчитайте стоимость пребывания:")
+
+    # Ввод часов и минут
+    stay_hours = st.number_input("Часы пребывания", min_value=0, max_value=15, step=1)
+    stay_minutes = st.number_input("Минуты пребывания", min_value=0, max_value=59, step=1)
+
+    if st.button("Рассчитать стоимость"):
+        total_minutes = stay_hours * 60 + stay_minutes
+        rate_per_minute = 5  # 5 руб/минута
+        stop_check_hours = 3
+        stop_check_max = 900  # руб
+
+        if total_minutes > stop_check_hours * 60:
+            # Применяем стоп-чек
+            total_cost = stop_check_max
+            st.info(f"Вы провели более {stop_check_hours} часов. Применен стоп-чек: {stop_check_max} рублей.")
+        else:
+            total_cost = total_minutes * rate_per_minute
+        
+        st.success(f"Стоимость за {stay_hours} час(а/ов) и {stay_minutes} минут(ы): {total_cost} рублей.")
+
 
 def main():
     # Проверяем, есть ли токен и данные пользователя
@@ -953,18 +1644,24 @@ def main():
     if 'user' not in st.session_state:
         st.session_state['user'] = None
 
-    # Если администратор вошёл в систему
-    if st.session_state['user'] and st.session_state['user']['role_name'] == 'admin':
-        st.sidebar.success(f"Вы вошли как администратор: {st.session_state['user']['first_name']}")
-
+    # Если пользователь вошёл в систему
+    if st.session_state['user']:
+        st.sidebar.success(f"Вы вошли как {st.session_state['user']['first_name']} ({st.session_state['user']['role_name']})")
+        
         # Кнопка для выхода
         if st.sidebar.button("Выйти"):
             st.session_state['token'] = None
             st.session_state['user'] = None
             st.rerun()
 
-        # Отображение страницы администратора
-        admin_page()
+        # Отображение страниц в зависимости от роли
+        if st.session_state['user']['role_name'] == 'admin':
+            admin_page()
+        elif st.session_state['user']['role_name'] == 'staff':
+            staff_page()
+        else:
+            user_page()
+
     else:
         # Главное меню для пользователей, которые ещё не вошли в систему
         menu = ["Вход", "Регистрация"]
@@ -972,8 +1669,6 @@ def main():
 
         if choice == "Вход":
             st.title("Вход в систему")
-            # st.subheader("Форма")
-            
             email = st.text_input("Email")
             password = st.text_input("Пароль", type='password')
             
@@ -1006,8 +1701,6 @@ def main():
 
         elif choice == "Регистрация":
             st.title("Регистрация нового пользователя")
-            # st.subheader("Форма")
-            
             first_name = st.text_input("Имя")
             last_name = st.text_input("Фамилия")
             email = st.text_input("Email")
@@ -1031,7 +1724,6 @@ def main():
                         show_info("Переключитесь на вкладку 'Вход'.")
                     else:
                         show_error(result)
-
 
 
 # Запуск приложения
